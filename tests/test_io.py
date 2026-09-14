@@ -245,3 +245,25 @@ def test_mztrading_am_settlement_and_single_name_exercise(tmp_path):
         _mztrading_frame(chain, symbol, file_day, SYNTH_QUOTE_DATE).to_parquet(p, index=False)
         back = io.read_mztrading(p, symbol)
         assert set(back.df["settlement"]) == {want_settle} and back.exercise == want_ex, symbol
+
+
+def test_xsp_is_pm_settled_on_every_expiry():
+    """Cboe relisted Mini-SPX (XSP) with PM settlement in November 2013; a third-Friday XSP is NOT an AM monthly and
+    an AM T would be 6.5 h short (0.9 % of T at 30 DTE)."""
+    assert "XSP" not in io.AM_SETTLED_ROOTS
+    assert io.settlement_for("XSP", date(2026, 9, 18)) == "PM" and io.settlement_for("XSP", date(2026, 9, 16)) == "PM"
+    assert io.settlement_for("NDX", date(2026, 9, 18)) == "AM" and io.settlement_for("NDXP", date(2026, 9, 18)) == "PM"
+
+
+def test_cboe_json_null_and_blank_quotes_are_dropped_and_counted():
+    """A null bid or a blank ask in the payload is NaN after coercion; it must be dropped with a ledger line, never
+    reach `Chain` (which now rejects NaN quotes), and the identity rows in - rows out holds."""
+    chain = _chain()
+    payload = synthetic_cboe_json(chain)
+    rows = payload["data"]["options"]
+    rows[3]["bid"], rows[5]["ask"], rows[7]["bid"] = None, "", "n/a"
+    back = io.read_cboe_json(payload)
+    assert back.ledger.dropped()["finite bid/ask, strike > 0"] == 3
+    assert len(back.df) == len(rows) - 3 == back.ledger.total_out
+    assert np.isfinite(back.df[["bid", "ask", "strike"]].to_numpy()).all()
+    assert back.coverage()["two_sided"] + back.coverage()["zero_bid"] == back.coverage()["quotes"]

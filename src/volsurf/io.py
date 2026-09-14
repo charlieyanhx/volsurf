@@ -9,8 +9,11 @@ Sources (none of them is redistributed with the repo; see README "Data and priva
                                   bid_size, ask_size, volume, open_interest, date, ...)
   read_mztrading(path, symbol)    one mztrading day file (Cboe JSON fields as parquet columns plus timestamp, symbol)
 
-Rules shared by all three, in this order, each recorded in `Chain.ledger` as (rule, rows in, rows out):
-  1. OCC symbol parsed -> root, expiry, right, strike (rows whose symbol does not parse are dropped and counted)
+Rules, in this order, each recorded in `Chain.ledger` as (rule, rows in, rows out):
+  1. OCC symbol parsed -> root, expiry, right, strike (rows whose symbol does not parse are dropped and counted);
+     read_philippdubach has no OCC symbol and takes expiration / strike / type from the file's columns instead
+     (root = symbol, settlement PM), so its first step is "rows for the day"
+  1b. non-finite bid / ask or strike <= 0 dropped and counted (every reader; `Chain` rejects NaN quotes)
   2. rows with expiry < quote_date dropped (an end-of-day file still lists the contracts that expired that day
      or the day before; a same-day expiry is kept and then dropped by `Chain.slices()` when T <= one hour)
   3. crossed quotes (ask < bid) dropped: `Chain` rejects them and a real file has a handful (mztrading _SPX 2026-08-10: 5)
@@ -22,8 +25,9 @@ business day and REQUIRES it to equal the date of the latest last_trade_time (th
 labelled D+1: file 2026-08-11 has max last_trade_time 2026-08-10T16:14:59 and 350 SPY rows that expired 08-10);
 read_philippdubach takes the requested day.
 
-Settlement / exercise: settlement is "AM" for the SPX, NDX, RUT, DJX and XSP roots on a third Friday (the monthlies,
-which settle at the 09:30 open) and for every VIX expiry (Wednesday open settlement), "PM" otherwise; exercise is
+Settlement / exercise: settlement is "AM" for the SPX, NDX, RUT and DJX roots on a third Friday (the monthlies,
+which settle at the 09:30 open) and for every VIX expiry (Wednesday open settlement), "PM" otherwise (XSP is PM-settled
+on every expiry: Cboe relisted Mini-SPX with PM settlement in November 2013); exercise is
 "european" for underscore-prefixed index symbols and VIX, "american" otherwise (ETFs, single names).
 
 Never consumed: the sources' iv / delta / gamma / vega / theta / rho / theo columns. volsurf inverts bid, mid and ask
@@ -57,7 +61,7 @@ __all__ = [
     "read_mztrading",
 ]
 
-AM_SETTLED_ROOTS = ("SPX", "NDX", "RUT", "DJX", "XSP")
+AM_SETTLED_ROOTS = ("SPX", "NDX", "RUT", "DJX")  # XSP monthlies have been PM-settled since 2013-11
 _OCC = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
 _MZ_FILE = re.compile(r"day_(\d{4}-\d{2}-\d{2})")
 
@@ -166,6 +170,9 @@ def read_cboe_json(path, exercise: str | None = None, quote_date: date | None = 
         "volume": _num(rows.loc[occ.index, "volume"]), "open_interest": _num(rows.loc[occ.index, "open_interest"]),
         "root": occ["root"], "settlement": [settlement_for(r, e) for r, e in zip(occ["root"], occ["expiry"], strict=True)],
     })
+    n = len(df)
+    df = df[np.isfinite(df["bid"]) & np.isfinite(df["ask"]) & (df["strike"] > 0)]
+    ledger.record("finite bid/ask, strike > 0", n, len(df))
     df = _finish(df, quote_date, ledger)
     src = f"cboe json {Path(str(path)).name if not isinstance(path, dict) else 'dict'} {symbol}"
     return Chain(symbol.lstrip("_"), quote_date, df, exercise=exercise, source=src, ledger=ledger)

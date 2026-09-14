@@ -60,7 +60,9 @@ EXACT = svi.SVIParams(0.02, 0.4, -0.6, 0.05, 0.2)
 VOGT = svi.SVIParams(-0.0410, 0.1331, 0.3060, 0.3586, 0.4153)
 MARKET_LIKE = svi.SVIParams(0.0163, 0.3455, -0.8988, 0.0373, 0.1164)
 NOMINAL_T = (0.05, 0.15, 0.4, 1.0)
-IV_BUCKETS = ((1e-4, math.inf, 1e-13), (1e-6, 1e-4, 1e-11), (1e-8, 1e-6, 1e-9))  # (tv/F lo, hi, bar on |iv - sigma|)
+IV_BUCKETS = ((1e-4, math.inf, 1e-13), (1e-6, 1e-4, 1e-11), (1e-8, 1e-6, 1e-9), (1e-10, 1e-8, 1e-8))
+# (tv/F lo, hi, bar on |iv - sigma|): the same partition as tests/test_iv.py, down to the 1e-10 floor, so the rows
+# of the README table plus the floor row sum to the sample size
 _MARKER = re.compile(r"(<!-- volsurf:begin:(\w+) -->\n)(.*?)(<!-- volsurf:end:\2 -->)", re.S)
 
 
@@ -245,8 +247,8 @@ def calendar_table() -> str:
 def reference_tables() -> tuple[str, str]:
     """(per-expiry table, coverage-by-|k| table) for the reference chain at noise 0 and 0.5."""
     per = ["| noise | expiry | T | quotes in the slice | selected | RMSE (vp) | max abs. (vp) | inside bid/ask | "
-           "g < 0 inside | g < 0 outside | within-band violations / triplets | raw-mid violations |",
-           "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
+           "g < 0 inside | g < 0 outside | within-band violations / triplets | raw-mid violations | polish converged |",
+           "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|"]
     cov = ["| noise | abs(k) bucket | quotes | inside bid/ask | coverage |", "|---:|---|---:|---:|---:|"]
     foot = []
     for noise in (0.0, 0.5):
@@ -256,9 +258,10 @@ def reference_tables() -> tuple[str, str]:
             per.append(f"| {noise:.1f} | {f.expiry:%Y-%m-%d} | {f.T:.4f} | {len(f.slice.df)} | {f.n} | {f.svi.rmse_vol:.2f} | "
                        f"{f.svi.max_abs_vol:.2f} | {f.coverage_pct:.1f} % | {f.butterfly.n_inside} | "
                        f"{'yes' if outside else 'no'} | {f.quote_level.butterfly_within_band} / {f.quote_level.n_triplets} | "
-                       f"{f.quote_level.butterfly_raw_mid} |")
+                       f"{f.quote_level.butterfly_raw_mid} | {'yes' if f.svi.converged else 'no'} |")
         for r in coverage_by_k(surface.fits).itertuples(index=False):
-            cov.append(f"| {noise:.1f} | {r.bucket} | {r.n} | {r.inside} | {r.coverage_pct:.1f} % |")
+            pct = f"{r.coverage_pct:.1f} %" if r.n else "no quotes selected (|k| <= 0.35 by default)"
+            cov.append(f"| {noise:.1f} | {r.bucket} | {r.n} | {r.inside} | {pct} |")
         foot.append(f"noise {noise:.1f}: {surface.report()['expiries_fitted']} of 4 expiries fitted, "
                     f"{surface.calendar.crossings} calendar crossings on the quoted k-range")
     return "\n".join(per) + "\n\n" + "; ".join(foot) + ".\n", "\n".join(cov) + "\n"
@@ -268,8 +271,8 @@ def reference_tables() -> tuple[str, str]:
 
 PRIVATE_COLUMNS = ("symbol", "quote date", "source", "exercise", "expiries fitted / skipped", "quotes in -> selected",
                    "RMSE vp median / worst", "inside bid/ask % median / worst", "coverage by abs(k) [0,.05) / [.05,.15) / [.15,.35) / [.35,inf)",
-                   "slices g<0 inside / outside", "within-band violations / triplets", "calendar crossings (quoted range)",
-                   "forward residual rms median / worst", "discount source", "wall s")
+                   "slices g<0 inside / outside", "polish not converged / at bound", "within-band violations / triplets",
+                   "calendar crossings (quoted range)", "forward residual rms median / worst", "discount source", "wall s")
 
 
 def private_header() -> str:
@@ -284,6 +287,7 @@ def private_row(surface: Surface) -> str:
              f"{r['rmse_vp_median']:.3f} / {r['rmse_vp_worst']:.3f}",
              f"{r['coverage_pct_median']:.1f} / {r['coverage_pct_worst']:.1f}", cov,
              f"{r['slices_g_neg_inside']} / {r['slices_g_neg_outside']}",
+             f"{r['slices_not_converged']} / {r['slices_at_bound']}",
              f"{r['within_band_violations']} / {r['n_triplets']}", str(r["calendar_crossings"]),
              f"{r['forward_residual_rms_median']:.4f} / {r['forward_residual_rms_worst']:.4f}", r["discount_source"],
              f"{r['wall_time']:.1f}")

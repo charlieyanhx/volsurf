@@ -17,8 +17,14 @@ Invariants kept here (each pinned by a test):
       variance and then drop the factor; in total-variance units the bound is 2 (GJ 2014 Remark 4.3;
       Martini-Mingone 2021). Shipping 4 lets wings twice as steep as any martingale measure allows through the fit.
   The fitter constrains w_min >= 0 and b (1 + |rho|) <= LEE_BOUND ONLY. Zeliade's 0 <= a box is not a no-arbitrage
-  condition (Vogt's own arbitrage example has a < 0) and it degrades real SPY fits 18x in RMSE.
+  condition (Vogt's own arbitrage example has a < 0) and it degrades real SPY fits 4-5x in RMSE (docs/DESIGN.md).
   Weights multiply the SQUARED residual: objective = sum_i weights_i (w_model(k_i) - w_i)^2.
+  A polished point that lands a few 1e-6 outside the constraint set (least_squares knows only the box, SLSQP stops at
+  its iteration cap) is PROJECTED onto it (b scaled down to Lee's bound, then a raised to w_min = 0) and its objective
+  re-evaluated there; `SVIFit.method` ends in "+proj" when that moved the point. `SVIFit.converged` is the solver's own
+  verdict (least_squares status > 0 or SLSQP success at the 1e-15 tolerances); False means the evaluation budget ran
+  out first, which on noisy data with unidentified wings is a flat objective, not a wrong curve. `SVIFit.at_bound`
+  names the parameters or constraints sitting on their boundary (b, rho, sigma, w_min, lee).
 """
 
 from __future__ import annotations
@@ -182,7 +188,10 @@ def from_ssvi(theta: float, rho: float, phi: float) -> SVIParams:
 @dataclass(frozen=True)
 class SVIFit:
     """Result of one slice fit. `objective` = sum weights (w_model - w)^2; `rmse_vol`/`max_abs_vol` in vol points
-    on sqrt(w/T); `wing_slopes` = (b(1-rho), b(1+rho)); `starts_tried` = polishes run; `method` names the path."""
+    on sqrt(w/T); `wing_slopes` = (b(1-rho), b(1+rho)); `starts_tried` = polishes run; `method` names the path
+    ("+proj" when the polished point was projected onto the constraint set); `converged` is the solver's verdict
+    (False = evaluation budget exhausted, see the module docstring); `at_bound` lists what sits on a boundary:
+    "b" (b = 0), "rho" (|rho| at its cap), "sigma" (sigma at its floor), "w_min" (w_min = 0), "lee" (b(1+|rho|) = 2)."""
 
     params: SVIParams
     objective: float
@@ -194,6 +203,7 @@ class SVIFit:
     wing_slopes: tuple[float, float]
     starts_tried: int
     method: str
+    at_bound: tuple[str, ...] = ()
 
 
 def _model(p, k):
@@ -219,11 +229,15 @@ def _check_inputs(k, w, T, weights):
         raise ValueError("need at least 5 quotes to identify 5 SVI parameters")
     if not (np.all(np.isfinite(k)) and np.all(np.isfinite(w))):
         raise ValueError("k and w must be finite")
+    if np.any(w < 0):
+        raise ValueError("total variance w must be >= 0")
     if T <= 0:
         raise ValueError("T must be positive")
     ww = np.ones_like(w) if weights is None else np.asarray(weights, dtype=float).ravel()
     if ww.shape != w.shape or np.any(ww < 0) or not np.all(np.isfinite(ww)):
         raise ValueError("weights must be finite, non-negative and match w")
+    if int(np.sum(ww > 0)) < 5:
+        raise ValueError("need at least 5 quotes with a positive weight to identify 5 SVI parameters")
     return k, w, float(T), ww
 
 
@@ -244,6 +258,37 @@ def _wmin_jac(p):
 def _feasible(p, tol=1e-9) -> bool:
     a, b, rho, m, sigma = p
     return (a + b * sigma * math.sqrt(max(1.0 - rho * rho, 0.0)) >= -tol) and (b * (1.0 + abs(rho)) <= LEE_BOUND + tol)
+
+
+def _project(p) -> tuple[np.ndarray, bool]:
+    """The nearest point of the constraint set along the two constraint directions: b scaled down onto Lee's bound
+    (which lowers w_min), then a raised so that w_min = 0. Returns (x, moved); a feasible point is returned as is."""
+    a, b, rho, m, sigma = (float(v) for v in p)
+    moved = False
+    if b * (1.0 + abs(rho)) > LEE_BOUND:
+        b, moved = LEE_BOUND / (1.0 + abs(rho)), True
+    w_min = a + b * sigma * math.sqrt(max(1.0 - rho * rho, 0.0))
+    if w_min < 0.0:
+        a, moved = a - w_min, True
+    return np.array([a, b, rho, m, sigma]), moved
+
+
+def _at_bound(p, tol=1e-9, ctol=1e-6) -> tuple[str, ...]:
+    """Parameter bounds are hit exactly (least_squares clips), so `tol`; the two constraints are met to SLSQP's
+    slack (~1e-7 in total variance), so `ctol` = 1e-6 of total variance (0.01 vp^2 at T = 1: below any fit error)."""
+    a, b, rho, m, sigma = (float(v) for v in p)
+    out = []
+    if b <= tol:
+        out.append("b")
+    if abs(rho) >= _RHO_MAX - tol:
+        out.append("rho")
+    if sigma <= _SIGMA_MIN + tol:
+        out.append("sigma")
+    if a + b * sigma * math.sqrt(max(1.0 - rho * rho, 0.0)) <= ctol:
+        out.append("w_min")
+    if b * (1.0 + abs(rho)) >= LEE_BOUND - ctol:
+        out.append("lee")
+    return tuple(out)
 
 
 _BOUNDS_LO = np.array([-np.inf, 0.0, -_RHO_MAX, -np.inf, _SIGMA_MIN])
@@ -323,7 +368,17 @@ def _finish(x, obj, ok, k, w, T, n_starts, method, t0) -> SVIFit:
     with np.errstate(invalid="ignore"):
         dv = 100.0 * (np.sqrt(np.maximum(sl.w(k), 0.0) / T) - np.sqrt(np.maximum(w, 0.0) / T))
     return SVIFit(params, obj, float(np.sqrt(np.mean(dv * dv))), float(np.max(np.abs(dv))), int(k.size), ok,
-                  time.perf_counter() - t0, sl.wing_slopes(), n_starts, method)
+                  time.perf_counter() - t0, sl.wing_slopes(), n_starts, method, _at_bound(x))
+
+
+def _projected(x, obj, method, k, w, ww):
+    """Project a polished point onto the constraint set and re-evaluate the objective there when it moved."""
+    if not np.all(np.isfinite(x)):
+        return x, obj, method
+    xp, moved = _project(x)
+    if not moved:
+        return x, obj, method
+    return xp, float(np.sum(ww * (_model(xp, k) - w) ** 2)), method + "+proj"
 
 
 def fit_svi(k, w, T, weights=None, grid=(41, 41), polish=True, n_keep=3) -> SVIFit:
@@ -332,9 +387,10 @@ def fit_svi(k, w, T, weights=None, grid=(41, 41), polish=True, n_keep=3) -> SVIF
     Zeliade's reduction on a `grid` = (n_m, n_sigma) of (m, sigma) — m over [k_min, k_max] widened by 10 % of the
     range, sigma over geomspace(0.005, 1.0) — with an unconstrained linear inner solve for (a, d, c); the best
     `n_keep` grid points seed one constrained polish each (bounded least_squares with the analytic Jacobian, then
-    SLSQP with w_min >= 0 and b(1+|rho|) <= LEE_BOUND only if the least-squares optimum is infeasible). The best
-    polished result is returned. `polish=False` returns the best grid point projected into the bounds (for the
-    bench). Constraints: w_min >= 0, b(1+|rho|) <= 2, b >= 0, sigma >= 1e-4, |rho| < 1; NO a >= 0 box.
+    SLSQP with w_min >= 0 and b(1+|rho|) <= LEE_BOUND only if the least-squares optimum is infeasible; a point still
+    outside the set by round-off or an iteration cap is projected onto it, `method` "+proj"). The best polished
+    result is returned. `polish=False` returns the best grid point projected into the bounds (for the bench).
+    Constraints: w_min >= 0, b(1+|rho|) <= 2, b >= 0, sigma >= 1e-4, |rho| < 1; NO a >= 0 box.
     """
     t0 = time.perf_counter()
     k, w, T, ww = _check_inputs(k, w, T, weights)
@@ -345,6 +401,7 @@ def fit_svi(k, w, T, weights=None, grid=(41, 41), polish=True, n_keep=3) -> SVIF
     best = None
     for s in starts:
         x, obj, ok, method = _polish(s, k, w, ww, T)
+        x, obj, method = _projected(x, obj, method, k, w, ww)
         if np.all(np.isfinite(x)) and _feasible(x, 1e-7) and (best is None or obj < best[1]):
             best = (x, obj, ok, method)
     if best is None:
@@ -374,8 +431,10 @@ def fit_svi_multistart(k, w, T, weights=None, n_starts=36) -> SVIFit:
             x, obj, ok = _slsqp(s, k, w, ww)
         except (ValueError, FloatingPointError):
             continue
+        x, obj, method = _projected(x, obj, "multistart-slsqp", k, w, ww)
         if np.all(np.isfinite(x)) and _feasible(x, 1e-7) and (best is None or obj < best[1]):
-            best = (x, obj, ok)
+            best = (x, obj, ok, method)
     if best is None:
         raise RuntimeError("SVI multistart fit failed from every seed")
-    return _finish(*best, k, w, T, len(seeds), "multistart-slsqp", t0)
+    x, obj, ok, method = best
+    return _finish(x, obj, ok, k, w, T, len(seeds), method, t0)

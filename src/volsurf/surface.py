@@ -12,10 +12,14 @@ Pipeline per slice (`fit_slice`), each stage's decisions kept on the `SliceFit`:
   arb.quote_level       -> raw-mid and within-band convexity counts on the slice's two-sided pairs (model-free)
   coverage_pct          -> share of the SELECTED quotes whose model price D Black(F, K, T, iv_model(k)) lies in
                            [bid, ask] (1e-9 slack for round-off); the number the README quotes as "inside bid/ask"
-A slice is SKIPPED (recorded with its reason on `Surface.skipped`, never silently) when the forward fit raises or fewer
-than `min_quotes` quotes survive selection. `arb.calendar` then runs across adjacent fitted slices on the k-range
+A slice is SKIPPED (recorded with its reason on `Surface.skipped`, never silently; its rows go to `Surface.skip_ledger`
+so the row identity quotes_in - quotes_selected = sum(quotes_dropped) holds with skips and reader drops) when the forward
+fit raises, fewer than `min_quotes` quotes survive selection, or the SVI fit raises. `arb.calendar` then runs across
+adjacent DISTINCT maturities of the fitted slices (two roots quoting the same T, SPX and SPXW on one PM date, are each
+compared with the neighbouring maturities and never with each other, noted on `CalendarReport.notes`) on the k-range
 both of them quote (a calendar crossing at a k neither slice has a quote at is extrapolation, reported separately by
-`Surface.arbitrage()`, which uses the wide [-1, 1] grid).
+`Surface.arbitrage()`, which uses the wide [-1, 1] grid). `report()['quotes_in']` is the number of rows the reader
+read (`Chain.ledger.total_in`; the chain's own rows for a synthetic chain).
 
 Units: vols per 1.00 (0.20 = 20 %), `rmse_vp` / `max_abs_vp` in vol points (100 x vol), k = ln(K/F), T in years by
 the chain's rule, coverage in percent, forward residuals in price units. `skew(expiry, delta)` = iv at the strike
@@ -46,7 +50,6 @@ from .arb import (
     QuoteLevelReport,
     butterfly,
     calendar,
-    check_arbitrage,
     quote_level,
 )
 from .forward import ForwardFit, fit_forward
@@ -122,9 +125,11 @@ def _weights_for(kind: str, sel: pd.DataFrame, F: float, T: float) -> np.ndarray
 
 
 def _inside_band(sel: pd.DataFrame, sl: SVISlice, F: float, D: float, T: float) -> np.ndarray:
+    """Model price inside [bid, ask] per selected quote; a NaN model price (w < 0 at that k) is outside."""
     K = sel["strike"].to_numpy(float)
     model = black.price(F, K, T, sl.iv(np.log(K / F)), sel["right"].to_numpy().astype(str), D)
-    return (model >= sel["bid"].to_numpy(float) - _INSIDE_TOL) & (model <= sel["ask"].to_numpy(float) + _INSIDE_TOL)
+    with np.errstate(invalid="ignore"):
+        return (model >= sel["bid"].to_numpy(float) - _INSIDE_TOL) & (model <= sel["ask"].to_numpy(float) + _INSIDE_TOL)
 
 
 def fit_slice(slice: Slice, rate: float | None = None, mode: str = "auto", weighting: str = "spread",
@@ -191,6 +196,7 @@ class Surface:
     exercise: str = ""
     quotes_in: int = 0
     chain_ledger: Ledger = field(default_factory=Ledger, compare=False)
+    skip_ledger: Ledger = field(default_factory=Ledger, compare=False)
 
     def expiries(self) -> list[tuple[str, pd.Timestamp]]:
         return [(f.root, f.expiry) for f in self.fits]
@@ -240,11 +246,21 @@ class Surface:
                          "coverage_pct": f.coverage_pct, "g_min": f.butterfly.worst_g, "g_neg_inside": f.butterfly.n_inside,
                          "g_neg_outside": f.butterfly.n_outside, "asymptote_left": f.butterfly.asymptote_left,
                          "asymptote_right": f.butterfly.asymptote_right, "within_band_violations":
-                         f.quote_level.butterfly_within_band, "raw_mid_violations": f.quote_level.butterfly_raw_mid})
+                         f.quote_level.butterfly_within_band, "raw_mid_violations": f.quote_level.butterfly_raw_mid,
+                         "converged": f.svi.converged, "at_bound": ",".join(f.svi.at_bound)})
         return pd.DataFrame(rows)
 
     def arbitrage(self) -> ArbitrageReport:
-        return check_arbitrage([(f.T, f.svi_slice, *f.k_range) for f in self.fits])
+        """Butterfly per slice on its quoted range plus the calendar check on the wide [-1, 1] grid across consecutive
+        distinct maturities (same as `arb.check_arbitrage`, but two roots on one maturity do not raise)."""
+        reports = [butterfly(f.svi_slice, *f.k_range) for f in self.fits]
+        cal = _calendar_across(list(self.fits), np.linspace(-1.0, 1.0, 401))
+        notes = [f"T={f.T:.4f}: {msg}" for f, r in zip(self.fits, reports, strict=True) for msg in r.notes]
+        if not cal.ok:
+            notes.append(f"calendar: {cal.crossings} crossings, worst gap {cal.worst_gap:.3e} at k={cal.worst_k:.4f} "
+                         f"between T={cal.pair[0]:.4f} and T={cal.pair[1]:.4f}")
+        notes.extend(f"calendar: {n}" for n in cal.notes)
+        return ArbitrageReport(all(r.ok for r in reports) and cal.ok, reports, cal, tuple(notes))
 
     def report(self) -> dict:
         """The dict `volsurf fit` / `volsurf report --data` print; every number labelled by its basis in the key."""
@@ -271,18 +287,28 @@ class Surface:
             "within_band_violations": int(sum(f.quote_level.butterfly_within_band for f in fits)),
             "raw_mid_violations": int(sum(f.quote_level.butterfly_raw_mid for f in fits)),
             "n_triplets": int(sum(f.quote_level.n_triplets for f in fits)),
+            "slices_not_converged": int(sum(not f.svi.converged for f in fits)),
+            "slices_at_bound": int(sum(bool(f.svi.at_bound) for f in fits)),
             "calendar_crossings": int(self.calendar.crossings), "calendar_worst_gap": float(self.calendar.worst_gap),
+            "calendar_pairs_checked": int(self.calendar.pairs_checked),
             "forward_residual_rms_median": float(np.median(fres)) if len(fits) else float("nan"),
             "forward_residual_rms_worst": float(fres.max()) if len(fits) else float("nan"),
             "discount_source": self.discount_source, "wall_time": float(self.wall_time),
         }
 
 
+SKIPPED_RULE = "skipped slices (reason on `skipped`)"
+
+
 def _pool_ledgers(surface: Surface, fits) -> dict[str, int]:
-    """Rows dropped per rule, summed over the chain ledger and the per-slice selection ledgers."""
+    """Rows dropped per rule, summed over the chain (reader + T) ledger, the rows of the skipped slices (one key) and
+    the per-slice selection ledgers; with quotes_in = the reader's rows the values sum to quotes_in - quotes_selected."""
     out: dict[str, int] = {}
     for rule, n in surface.chain_ledger.dropped().items():
         out[rule] = out.get(rule, 0) + n
+    n_skipped = sum(surface.skip_ledger.dropped().values())
+    if n_skipped:
+        out[SKIPPED_RULE] = n_skipped
     for f in fits:
         for rule, n in f.ledger.dropped().items():
             out[rule] = out.get(rule, 0) + n
@@ -311,26 +337,54 @@ def _k_at_delta(sl: SVISlice, target: float, k_max: float = 3.0, n: int = 601) -
     return float(brentq(f, grid[i], grid[i + 1], xtol=1e-14))
 
 
-def _calendar_on_quoted_ranges(fits: list[SliceFit], n: int = 401) -> CalendarReport:
-    """Calendar check per adjacent pair (by T) on the k-range BOTH slices quote (the intersection of their selected
-    ranges), aggregated: crossings summed, worst gap kept with its k and pair; k_range_checked = the union covered.
-    A pair whose quoted ranges do not overlap is not checked (nothing to compare without extrapolating)."""
-    ordered = sorted(fits, key=lambda f: f.T)
-    if len(ordered) < 2:
-        return CalendarReport(True, 0, 0.0, None, None, None)
-    crossings, worst, worst_k, pair, lo_all, hi_all = 0, math.inf, None, None, math.inf, -math.inf
-    for f1, f2 in zip(ordered[:-1], ordered[1:], strict=True):
-        lo, hi = max(f1.k_range[0], f2.k_range[0]), min(f1.k_range[1], f2.k_range[1])
-        if hi <= lo:
-            continue
-        r = calendar([(f1.T, f1.svi_slice), (f2.T, f2.svi_slice)], k_grid=np.linspace(lo, hi, n))
+_SAME_T = 1e-12  # relative: two slices closer than this in T are the same maturity (two roots on one date)
+
+
+def _maturity_pairs(fits: list[SliceFit]) -> tuple[list[tuple[SliceFit, SliceFit]], list[str]]:
+    """Every (earlier, later) pair of fits across consecutive DISTINCT maturities; slices sharing a maturity (two roots
+    on one settlement date) are each paired with the neighbouring maturities and noted, never with each other."""
+    groups: list[list[SliceFit]] = []
+    for f in sorted(fits, key=lambda f: (f.T, f.root)):
+        if groups and abs(f.T - groups[-1][0].T) <= _SAME_T * max(1.0, f.T):
+            groups[-1].append(f)
+        else:
+            groups.append([f])
+    notes = [f"T={g[0].T:.4f}: roots {[f.root for f in g]} share the maturity and are compared with the neighbouring "
+             f"maturities, not with each other" for g in groups if len(g) > 1]
+    pairs = [(f1, f2) for g1, g2 in zip(groups[:-1], groups[1:], strict=True) for f1 in g1 for f2 in g2]
+    return pairs, notes
+
+
+def _calendar_across(fits: list[SliceFit], k_grid=None, n: int = 401) -> CalendarReport:
+    """Calendar check per pair of consecutive maturities, on `k_grid` when given, else on the k-range BOTH slices quote
+    (the intersection of their selected ranges; a pair whose ranges do not overlap is not checked and noted: nothing to
+    compare without extrapolating). Aggregated: crossings summed, worst gap kept with its k and pair, k_range_checked =
+    the union covered, pairs_checked = the pairs actually compared (0 = `ok` is vacuous)."""
+    pairs, notes = _maturity_pairs(fits)
+    crossings, worst, worst_k, pair, lo_all, hi_all, checked = 0, math.inf, None, None, math.inf, -math.inf, 0
+    for f1, f2 in pairs:
+        if k_grid is None:
+            lo, hi = max(f1.k_range[0], f2.k_range[0]), min(f1.k_range[1], f2.k_range[1])
+            if hi <= lo:
+                notes.append(f"T={f1.T:.4f} ({f1.root}) and T={f2.T:.4f} ({f2.root}): quoted k-ranges do not overlap, "
+                             "not compared")
+                continue
+            grid = np.linspace(lo, hi, n)
+        else:
+            grid = np.asarray(k_grid, dtype=float)
+            lo, hi = float(grid.min()), float(grid.max())
+        r = calendar([(f1.T, f1.svi_slice), (f2.T, f2.svi_slice)], k_grid=grid)
         crossings += r.crossings
+        checked += 1
         lo_all, hi_all = min(lo_all, lo), max(hi_all, hi)
         if r.worst_gap < worst:
             worst, worst_k, pair = r.worst_gap, r.worst_k, r.pair
-    if not math.isfinite(lo_all):
-        return CalendarReport(True, 0, 0.0, None, None, None)
-    return CalendarReport(crossings == 0, crossings, float(worst), worst_k, pair, (float(lo_all), float(hi_all)))
+    if checked == 0:
+        if len(fits) < 2:
+            notes.append("single slice: calendar condition not applicable")
+        return CalendarReport(True, 0, 0.0, None, None, None, 0, tuple(notes))
+    return CalendarReport(crossings == 0, crossings, float(worst), worst_k, pair, (float(lo_all), float(hi_all)),
+                          checked, tuple(notes))
 
 
 def fit_surface(chain: Chain, rate: float | None = None, mode: str = "auto", weighting: str = "spread",
@@ -344,13 +398,14 @@ def fit_surface(chain: Chain, rate: float | None = None, mode: str = "auto", wei
     t0 = time.perf_counter()
     fits: list[SliceFit] = []
     skipped: list[tuple[str, str]] = []
+    skip_ledger = Ledger()
     for sl in chain.slices():
         try:
             fits.append(fit_slice(sl, rate=rate, mode=mode, weighting=weighting, min_quotes=min_quotes, **select_kw))
         except (ValueError, RuntimeError) as e:
             skipped.append((sl.label(), str(e)))
-    cal = _calendar_on_quoted_ranges(fits) if calendar_k_grid is None else \
-        calendar([(f.T, f.svi_slice) for f in fits], k_grid=calendar_k_grid)
+            skip_ledger.record(f"skipped {sl.label()}", len(sl.df), 0)
+    cal = _calendar_across(fits, calendar_k_grid)
     modes = sorted({f.forward.mode for f in fits})
     if rate is not None and "fixed_discount" in modes:
         src = f"discount pinned from rate {rate:g} (fixed_discount)" + (
@@ -358,4 +413,4 @@ def fit_surface(chain: Chain, rate: float | None = None, mode: str = "auto", wei
     else:
         src = "discount fitted on the parity line" if fits else "no slice fitted"
     return Surface(chain.symbol, chain.quote_date, tuple(fits), cal, tuple(skipped), src, time.perf_counter() - t0,
-                   chain.source, chain.exercise, len(chain.df), chain.ledger)
+                   chain.source, chain.exercise, chain.ledger.total_in, chain.ledger, skip_ledger)

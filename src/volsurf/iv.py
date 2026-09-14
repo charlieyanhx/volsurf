@@ -20,9 +20,8 @@ for tv/F >= 1e-4, ~1e-12 for [1e-6, 1e-4), ~1e-10 for [1e-8, 1e-6) (see tests/te
 Units and signs: sigma is annualised Black volatility (0.20 = 20 %), F and K in the same currency,
 T in years, D the discount factor to expiry (1.0 = undiscounted), `right` "C"/"P" or booleans is_call.
 Speed (Apple M1 laptop, Python 3.12, numpy 2.5, 1e5 random points F = 100, k ~ U(-0.5, 0.5),
-sigma ~ U(0.05, 1), T ~ U(0.01, 2), half of them ITM): 0.5-0.6 microseconds per point end to end,
-mean 3.7 Halley iterations, max 16 near the floor. Measured (tests/test_iv.py::test_speed_report
-prints it), not asserted.
+sigma ~ U(0.05, 1), T ~ U(0.01, 2), half of them ITM): 0.5-0.6 microseconds per point end to end.
+Measured (tests/test_iv.py::test_speed_report prints it), not asserted.
 """
 
 from __future__ import annotations

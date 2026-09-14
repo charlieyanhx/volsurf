@@ -303,3 +303,21 @@ def test_tree_priced_american_chain_bias_is_the_reported_one():
     free = fit_forward(sl, mode="parity_line", force=True, window=None)
     assert free.discount > 1.0 and abs(free.discount - 1.011) < 0.003
     assert (free.forward / F - 1.0) * 1e4 < -25.0
+
+
+def test_fixed_discount_rejects_a_forward_far_from_the_atm_strike():
+    """Mids that do not satisfy parity (every put shifted +$500) drive the pinned-discount estimator to F = -401 on
+    a chain whose strikes are 80-120; that is not a forward and must be a ValueError (forward_table: a 'failed' row),
+    not a fitted row that implied_vols rejects later."""
+    from volsurf.forward import FORWARD_BAND, fit_forward, forward_table
+
+    chain, F1, F2 = _two_expiry_chain(exercise="american")
+    df = chain.df.copy()
+    df.loc[df["right"] == "P", ["bid", "ask"]] += 500.0
+    bad = Chain("SPY", chain.quote_date, df, exercise="american")
+    sl = next(bad.slices())
+    with pytest.raises(ValueError, match=f"within {FORWARD_BAND:g} of the ATM strike"):
+        fit_forward(sl, rate=0.05)
+    tbl = forward_table(bad, rate=0.05)
+    assert (tbl["mode"] == "failed").all() and tbl["notes"].str.contains("ATM strike").all()
+    assert fit_forward(next(chain.slices()), rate=0.05).forward == pytest.approx(F1, rel=1e-4)  # the clean chain fits

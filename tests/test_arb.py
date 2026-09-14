@@ -233,3 +233,23 @@ def test_heston_cos_surface_is_free_of_static_arbitrage(N):
     rep = check_arbitrage(fits, k_grid=np.linspace(-kmax, kmax, 801))  # butterfly per fitted slice + calendar
     assert rep.ok and all(b.n_inside == 0 and b.n_outside == 0 and b.worst_g > 0 for b in rep.butterfly)
     assert all(b.asymptote_left > 0 and b.asymptote_right > 0 for b in rep.butterfly)
+
+
+def test_repair_jw_raises_where_gj_thm_4_2_does_not_certify_the_repaired_slice():
+    """The closed form of GJ section 5.1 yields an SSVI slice, which Theorem 4.2 certifies butterfly-free only under
+    sqrt(vT) max(p, c') < 2 and (p + c') max(p, c') <= 2. This Lee-feasible raw slice (b(1+|rho|) = 1.257 <= 2,
+    w_min > 0) repairs to (p + c') max(p, c') = 18.7 and the 'repaired' slice has g_min = -0.476 at k = -0.24 (1010
+    grid violations on [-1.5, 1.5]): the function must refuse rather than hand back an arbitrageable smile."""
+    bad = SVIParams(0.01597, 0.6629, -0.8962, -0.2254, 0.3419)
+    T = 1.312
+    assert bad.b * (1 + abs(bad.rho)) <= 2 and SVISlice(bad, T).min_total_variance() > 0
+    v, psi, p, _, _ = to_jw(bad, T)
+    c_new = p + 2 * psi
+    assert (p + c_new) * max(p, c_new) == pytest.approx(18.706, abs=1e-2)
+    from volsurf.svi import from_jw
+
+    naive = SVISlice(from_jw(v, psi, p, c_new, v * 4 * p * c_new / (p + c_new) ** 2, T), T)
+    r = butterfly(naive, -1.5, 1.5)
+    assert not r.ok and r.worst_g == pytest.approx(-0.4757, abs=1e-3) and r.n_inside == 1010
+    with pytest.raises(ValueError, match="Thm 4.2"):
+        repair_jw(bad, T)

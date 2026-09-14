@@ -10,7 +10,8 @@
       prints the chain's coverage line and ledger, the term structure per expiry, the skipped slices with reasons,
       the arbitrage notes, and the report dict
 
-`--rate` is the continuously compounded rate per year used to pin the discount on American chains (required there);
+`--rate` is the continuously compounded rate per year used to pin the discount on American chains (required there:
+without it every slice would be skipped, so the command exits 2 instead of printing an empty surface);
 `--day` selects the day inside a philippdubach parquet; `--quote-date` overrides the readers' date rules.
 Exit status 0 on success, 2 on a usage or data error (message on stderr).
 """
@@ -51,6 +52,14 @@ def _parse_date(s: str | None) -> date | None:
     return None if s is None else date.fromisoformat(s)
 
 
+def _require_rate(chain: Chain, rate: float | None) -> None:
+    """An American chain without --rate cannot fit a single slice (auto -> fixed_discount needs the rate, parity_line
+    is refused); make that a usage error rather than a surface with 0 fits and NaN statistics."""
+    if chain.exercise == "american" and rate is None:
+        raise ValueError(f"{chain.symbol} {chain.quote_date} is an American chain: pass --rate (continuous, per year) "
+                         "to pin the discount; the parity line cannot identify it (see README, Design rules)")
+
+
 def print_surface(surface: Surface, chain: Chain, out=None) -> None:
     """Coverage line, reader ledger, term structure, skips, calendar, wide-grid arbitrage notes, report dict.
     `out` defaults to sys.stdout resolved at call time (so a captured stdout sees it)."""
@@ -66,7 +75,9 @@ def print_surface(surface: Surface, chain: Chain, out=None) -> None:
             print(ts.drop(columns=["asymptote_left", "asymptote_right"]).to_string(index=False), file=out)
     for label, reason in surface.skipped:
         print(f"skipped {label}: {reason}", file=out)
-    print(f"calendar (quoted k-range): {surface.calendar}", file=out)
+    cal = surface.calendar
+    print(f"calendar (quoted k-range): {cal}" if cal.pairs_checked else
+          f"calendar (quoted k-range): not checked, no pair compared: {cal}", file=out)
     for note in surface.arbitrage().notes:
         print(f"arbitrage (wide grid): {note}", file=out)
     for key, val in surface.report().items():
@@ -84,6 +95,7 @@ def _cmd_report(args) -> int:
         print(report.timing_table(), end="")
         return 0
     chain = load_chain(args.data, args.source, args.symbol, args.day, _parse_date(args.quote_date))
+    _require_rate(chain, args.rate)
     surface = fit_surface(chain, rate=args.rate, mode=args.mode)
     row = report.private_row(surface)
     text = (report.private_header() if args.header else "") + row
@@ -99,6 +111,7 @@ def _cmd_report(args) -> int:
 
 def _cmd_fit(args) -> int:
     chain = load_chain(args.file, args.source, args.symbol, args.day, _parse_date(args.quote_date))
+    _require_rate(chain, args.rate)
     surface = fit_surface(chain, rate=args.rate, mode=args.mode)
     print_surface(surface, chain)
     return 0

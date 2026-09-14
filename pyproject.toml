@@ -10,7 +10,7 @@ dependencies = ["numpy>=1.26", "scipy>=1.11", "pandas>=2.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff", "pyarrow>=15"]
-oracle = ["lets-be-rational>=1.1.2", "pricers"]
+oracle = ["lets-be-rational>=1.1.2", "pricers @ git+https://github.com/charlieyanhx/pricers"]
 
 [project.urls]
 Homepage = "https://github.com/charlieyanhx/volsurf"

@@ -84,12 +84,17 @@ def test_report_dict_keys_and_coverage_buckets(exact):
                 "forward_residual_rms_worst", "discount_source", "wall_time"):
         assert key in r, key
     assert r["expiries_fitted"] == 4 and r["expiries_skipped"] == 0
-    assert r["quotes_in"] == len(reference_chain(0.0).df)
+    assert r["quotes_in"] == len(reference_chain(0.0).df)  # no reader: the chain's own rows
     assert r["quotes_selected"] == sum(f.n for f in exact.fits)
     assert r["quotes_in"] - r["quotes_selected"] == sum(r["quotes_dropped"].values())  # the ledgers conserve rows
+    assert r["slices_not_converged"] == 0 and r["slices_at_bound"] == 0 and r["calendar_pairs_checked"] == 3
+    ts = exact.term_structure()
+    assert ts["converged"].all() and (ts["at_bound"] == "").all()
     buckets = coverage_by_k(exact.fits)
     assert list(buckets["bucket"]) == list(r["coverage_by_k"])
-    assert int(buckets["n"].sum()) == r["quotes_selected"] and (buckets["coverage_pct"] == 100.0).all()
+    assert int(buckets["n"].sum()) == r["quotes_selected"]
+    filled = buckets[buckets["n"] > 0]                       # the |k| <= 0.35 default leaves the last bucket empty (NaN %)
+    assert len(filled) == 3 and (filled["coverage_pct"] == 100.0).all() and buckets["coverage_pct"].isna().sum() == 1
     assert len(K_BUCKETS) == 4 and coverage_by_k([])["n"].sum() == 0
 
 
@@ -116,9 +121,94 @@ def test_skipped_slices_carry_their_reason():
     assert len(s.fits) == 3 and len(s.skipped) == 1
     label, reason = s.skipped[0]
     assert "2026-11-08" in label and ("min_quotes" in reason or "min_pairs" in reason)
-    assert s.report()["expiries_skipped"] == 1
+    r = s.report()
+    assert r["expiries_skipped"] == 1
+    n_skipped_rows = int((chain.df["expiry"] == pd.Timestamp("2026-11-08")).sum())
+    assert r["quotes_dropped"]["skipped slices (reason on `skipped`)"] == n_skipped_rows == 18
+    assert r["quotes_in"] - r["quotes_selected"] == sum(r["quotes_dropped"].values())  # the identity holds WITH a skip
+    assert s.calendar.pairs_checked == 2 and s.calendar.ok
     with pytest.raises(ValueError):
         fit_slice(next(sl for sl in chain.slices() if sl.expiry == pd.Timestamp("2026-11-08")), min_quotes=8)
+
+
+def test_row_identity_holds_through_a_reader_with_drops_and_a_skip():
+    """quotes_in is the number of rows the reader read; reader drops (a null bid, five expired rows, a crossed row), the
+    rows of a skipped slice and the selection ledgers sum to quotes_in - quotes_selected."""
+    from volsurf import io
+    from volsurf.synth import occ_symbol, synthetic_cboe_json
+
+    strikes = [synth_strikes(e.forward, T, 0.2, n=81, width=4.0, step=0.5)
+               for e, T in zip(SYNTH_SURFACE, (0.05, 0.15, 0.4, 1.0), strict=True)]
+    strikes[2] = strikes[2][::9]
+    chain = synthetic_chain("SYN", SYNTH_QUOTE_DATE, SYNTH_SURFACE, strikes,
+                            half_spread=lambda p, k: np.maximum(0.02, 0.01 * np.asarray(p)))
+    payload = synthetic_cboe_json(chain)
+    rows = payload["data"]["options"]
+    rows += [dict(rows[0], option=occ_symbol("SYN", "2026-06-01", "C", 100.0 + i)) for i in range(5)]  # expired
+    crossed = dict(rows[0], option=occ_symbol("SYN", "2026-07-03", "C", 1.5), bid=2.0, ask=1.0)
+    rows.append(crossed)
+    rows[3]["bid"] = None
+    read = io.read_cboe_json(payload)
+    assert read.ledger.total_in == len(rows) == len(chain.df) + 6
+    s = fit_surface(read, min_quotes=8)
+    r = s.report()
+    assert len(s.skipped) == 1 and r["quotes_in"] == len(rows)
+    d = r["quotes_dropped"]
+    assert d["finite bid/ask, strike > 0"] == 1 and d["expiry >= quote_date"] == 5 and d["not crossed (ask >= bid)"] == 1
+    assert d["skipped slices (reason on `skipped`)"] == 18
+    assert r["quotes_in"] - r["quotes_selected"] == sum(d.values())
+    assert sum(s.skip_ledger.dropped().values()) == 18 and s.skip_ledger.steps[0][0].startswith("skipped SYN SYN 2026-11-08")
+
+
+def test_two_roots_on_one_maturity_fit_and_are_compared_with_the_neighbours_not_each_other():
+    """SPX and SPXW both PM on one date have the same T; `arb.calendar` refuses equal maturities, so fit_surface
+    pairs each of them with the next maturity, notes it, and never raises (every fit would otherwise be lost)."""
+    from volsurf.quotes import Chain
+
+    strikes = [synth_strikes(e.forward, T, 0.2, n=81, width=4.0, step=0.5)
+               for e, T in zip(SYNTH_SURFACE, (0.05, 0.15, 0.4, 1.0), strict=True)]
+    hs = lambda p, k: np.maximum(0.02, 0.01 * np.asarray(p))  # noqa: E731
+    a = synthetic_chain("SPX", SYNTH_QUOTE_DATE, SYNTH_SURFACE[1:2], strikes[1], root="SPX", half_spread=hs)
+    b = synthetic_chain("SPX", SYNTH_QUOTE_DATE, SYNTH_SURFACE[1:2], strikes[1], root="SPXW", half_spread=hs)
+    c = synthetic_chain("SPX", SYNTH_QUOTE_DATE, SYNTH_SURFACE[2:3], strikes[2], root="SPX", half_spread=hs)
+    chain = Chain("SPX", SYNTH_QUOTE_DATE, pd.concat([a.df, b.df, c.df], ignore_index=True))
+    for kw in ({}, {"calendar_k_grid": np.linspace(-1.0, 1.0, 401)}):
+        s = fit_surface(chain, **kw)
+        assert len(s.fits) == 3 and s.skipped == ()
+        assert s.fits[0].T == s.fits[1].T and {f.root for f in s.fits[:2]} == {"SPX", "SPXW"}
+        assert s.calendar.ok and s.calendar.pairs_checked == 2 and s.calendar.crossings == 0
+        assert any("share the maturity" in n for n in s.calendar.notes)
+        assert s.report()["calendar_pairs_checked"] == 2
+        wide = s.arbitrage()
+        assert wide.ok and wide.calendar.pairs_checked == 2 and any("share the maturity" in n for n in wide.notes)
+    with pytest.raises(KeyError, match="roots"):
+        s.fit(SYNTH_SURFACE[1].expiry)
+    assert s.fit(SYNTH_SURFACE[1].expiry, root="SPXW").root == "SPXW"
+
+
+def test_calendar_not_checked_is_said_when_no_pair_overlaps():
+    """Two fitted slices whose quoted k-ranges are disjoint have nothing to compare: ok is vacuous, pairs_checked 0."""
+    from volsurf.surface import _calendar_across
+
+    exact = fit_surface(reference_chain(0.0))
+    f1, f2 = exact.fits[0], exact.fits[1]
+    lo = f1.k_range[1] + 0.05
+    f2_far = SliceFitShift(f2, (lo, lo + 0.2))
+    cal = _calendar_across([f1, f2_far])
+    assert cal.ok and cal.pairs_checked == 0 and cal.crossings == 0 and cal.k_range_checked is None
+    assert any("do not overlap" in n for n in cal.notes)
+    single = _calendar_across([f1])
+    assert single.pairs_checked == 0 and any("single slice" in n for n in single.notes)
+
+
+class SliceFitShift:
+    """A SliceFit stand-in with a different quoted k_range (everything else delegated)."""
+
+    def __init__(self, fit, k_range):
+        self._fit, self.k_range = fit, k_range
+
+    def __getattr__(self, name):
+        return getattr(self._fit, name)
 
 
 def test_american_chain_needs_a_rate_and_then_pins_the_discount():

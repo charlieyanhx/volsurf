@@ -20,7 +20,8 @@ Three checks, each with its own report:
 
 Sign conventions: g < 0, gap < 0, second difference < 0 are the violations; `worst_*` is the most negative value seen,
 reported even when it is positive (then `ok` is True). Tolerance `tol` (default -1e-10) absorbs round-off.
-`repair_jw` (GJ 2014 section 5.1) is opt-in: the fitter never calls it.
+`repair_jw` (GJ 2014 section 5.1) is opt-in: the fitter never calls it, and it raises when GJ Theorem 4.2's sufficient
+conditions do not hold on the repaired parameters (the closed form is butterfly-free only under them).
 """
 
 from __future__ import annotations
@@ -72,12 +73,17 @@ class ButterflyReport:
 
 @dataclass(frozen=True)
 class CalendarReport:
+    """`pairs_checked` = adjacent-maturity pairs compared; 0 means nothing was compared (one slice, or no pair with an
+    overlapping quoted k-range) and `ok` is vacuous. `notes` records pairs that were not compared and why."""
+
     ok: bool
     crossings: int
     worst_gap: float
     worst_k: float | None
     pair: tuple[float, float] | None
     k_range_checked: tuple[float, float] | None
+    pairs_checked: int = 0
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -169,7 +175,8 @@ def calendar(slices: list[tuple[float, SVISlice]], k_grid=None, tol: float = TOL
         i = int(np.argmin(gap))
         if gap[i] < worst:
             worst, worst_k, pair = float(gap[i]), float(k[i]), (float(T1), float(T2))
-    return CalendarReport(crossings == 0, crossings, worst, worst_k, pair, (float(k.min()), float(k.max())))
+    return CalendarReport(crossings == 0, crossings, worst, worst_k, pair, (float(k.min()), float(k.max())),
+                          len(ordered) - 1)
 
 
 def _second_differences(K: np.ndarray, lo: np.ndarray, mid: np.ndarray, hi: np.ndarray) -> np.ndarray:
@@ -220,14 +227,24 @@ def check_arbitrage(fits: list[tuple[float, SVISlice, float, float]], margin: fl
 
 
 def repair_jw(params: SVIParams, T: float) -> SVIParams:
-    """GJ 2014 section 5.1: keep (v, psi, p) and set c' = p + 2 psi, vtilde' = v 4 p c' / (p + c')^2, which is
-    guaranteed free of butterfly arbitrage (Lemma 4.1 via the SSVI form). OPT-IN: the fitter never calls this; a
-    repaired slice is a different smile (it moves the call wing and the minimum variance), so report the violation
-    and let the caller decide. GJ's Example 5.1 'optimal' (c*, vtilde*) = (0.8564763, 0.0116249) comes from a
-    penalised price-distance optimisation, not from this closed form (which gives (0.3493158, 0.0154818))."""
+    """GJ 2014 section 5.1: keep (v, psi, p) and set c' = p + 2 psi, vtilde' = v 4 p c' / (p + c')^2, which makes the
+    slice an SSVI slice (Lemma 4.1 / Remark 4.2). An SSVI slice is free of butterfly arbitrage when GJ Theorem 4.2's
+    two sufficient conditions hold, which in JW terms read sqrt(v T) max(p, c') < 2 and (p + c') max(p, c') <= 2;
+    the closed form does NOT guarantee them (on random Lee-feasible raw slices roughly a quarter of the repairs fail
+    them and carry g < 0), so they are checked here and a ValueError names the one that fails. OPT-IN: the fitter
+    never calls this; a repaired slice is a different smile (it moves the call wing and the minimum variance), so
+    report the violation and let the caller decide. GJ's Example 5.1 'optimal' (c*, vtilde*) = (0.8564763, 0.0116249)
+    comes from a penalised price-distance optimisation, not from this closed form (which gives
+    (0.3493158, 0.0154818))."""
     v, psi, p, _, _ = to_jw(params, T)
     c_new = p + 2.0 * psi
     if c_new <= 0:
         raise ValueError("p + 2 psi <= 0: the repair has no positive call wing")
     vt_new = v * 4.0 * p * c_new / (p + c_new) ** 2
+    big = max(p, c_new)
+    if not (np.sqrt(v * T) * big < 2.0 and (p + c_new) * big <= 2.0):
+        raise ValueError(f"repair_jw: the repaired SSVI slice fails GJ Thm 4.2's sufficient conditions "
+                         f"(sqrt(vT) max(p, c') = {np.sqrt(v * T) * big:.4f} < 2, (p + c') max(p, c') = "
+                         f"{(p + c_new) * big:.4f} <= 2), so it is not certified free of butterfly arbitrage; "
+                         f"report the violation instead")
     return from_jw(v, psi, p, c_new, vt_new, T)

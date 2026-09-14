@@ -58,7 +58,11 @@ def test_recovery_ivroundtrip_and_fitters_blocks_all_pass(blocks):
     for name in ("recovery", "ivroundtrip", "fitters"):
         assert "NO" not in blocks[name].split("\n", 2)[2], name
     assert blocks["recovery"].count("| yes |") >= 5
-    assert "| 2296 |" in blocks["ivroundtrip"] or "NaN returned" in blocks["ivroundtrip"]
+    # the floor row: n points, every one NaN; the bucket rows plus the floor row partition the 100,000 points
+    floor = re.search(r"information floor\) \| (\d+) \| NaN \| yes \| n/a \| (\d+) \|", blocks["ivroundtrip"])
+    assert floor and floor.group(1) == floor.group(2) == "2296"
+    counts = [int(m) for m in re.findall(r"^\| [^|]+ \| (\d+) \|", blocks["ivroundtrip"], re.M)]
+    assert len(counts) == len(report.IV_BUCKETS) + 1 and sum(counts) == 100_000
     assert "| 3 | yes | yes |" in blocks["fitters"] and "| 36 | same | same |" in blocks["fitters"]
 
 
@@ -81,7 +85,8 @@ def test_reference_and_coverage_blocks(blocks):
     assert "4 of 4 expiries fitted, 0 calendar crossings" in ref
     assert "| 100.0 % |" in ref and "| 0.00 | 0.00 | 100.0 % | 0 | no | 0 /" in ref
     cov = blocks["coverage"]
-    assert cov.count("[0.35, inf)") == 2 and cov.count("100.0 %") == 8
+    assert cov.count("[0.35, inf)") == 2 and cov.count("100.0 %") == 6      # the |k| <= 0.35 default empties the last bucket
+    assert cov.count("no quotes selected") == 2
 
 
 def test_readme_wording_rules():
@@ -141,6 +146,19 @@ def test_cli_report_data_prints_a_private_row_and_appends(tmp_path, capsys):
     assert "| SYN | 2026-06-15 |" in out and "machine:" in out
     assert out_file.read_text().startswith(report.private_header())
     assert out_file.read_text().count("| SYN | 2026-06-15 |") == 1
+
+
+def test_cli_american_chain_without_rate_is_a_usage_error(tmp_path, capsys):
+    """Without --rate every slice of an American chain is skipped; that is exit 2 with the reason, not a surface of
+    0 fits with NaN statistics and exit 0."""
+    p = _cboe_file(tmp_path, exercise="american", symbol="SPY")
+    assert cli.main(["fit", str(p), "--source", "cboe"]) == 2
+    assert cli.main(["report", "--data", str(p), "--source", "cboe"]) == 2
+    err = capsys.readouterr().err
+    assert err.count("American chain: pass --rate") == 2
+    assert cli.main(["fit", str(p), "--source", "cboe", "--rate", "0.045"]) == 0
+    out = capsys.readouterr().out
+    assert "expiries_fitted: 4" in out and out.count("fixed_discount") >= 4
 
 
 def test_cli_errors_are_exit_2(tmp_path, capsys):

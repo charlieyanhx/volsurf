@@ -239,3 +239,51 @@ def test_input_validation():
         fit_svi(K25, SVISlice(TRUE, 0.25).w(K25), 0.0)
     with pytest.raises(ValueError):
         fit_svi(K25, SVISlice(TRUE, 0.25).w(K25), 0.25, weights=np.ones(3))
+
+
+def test_zero_or_too_few_positive_weights_and_negative_w_are_rejected():
+    """A weight vector with fewer than 5 positive entries leaves the objective unable to identify the curve (all-zero
+    weights made every parameter set 'converged' at objective 0); a negative total variance is not a variance."""
+    w = SVISlice(TRUE, 0.25).w(K25)
+    with pytest.raises(ValueError, match="positive weight"):
+        fit_svi(K25, w, 0.25, weights=np.zeros(25))
+    ww = np.zeros(25)
+    ww[[0, 6, 12, 18]] = 1.0
+    with pytest.raises(ValueError, match="positive weight"):
+        fit_svi(K25, w, 0.25, weights=ww)
+    ww[24] = 1.0  # five weighted quotes across the range identify the exact slice
+    assert np.max(np.abs(_p(fit_svi(K25, w, 0.25, weights=ww).params) - _p(TRUE))) <= 1e-6
+    bad = w.copy()
+    bad[0] = -1e-3
+    with pytest.raises(ValueError, match="w must be >= 0"):
+        fit_svi(K25, bad, 0.25)
+    with pytest.raises(ValueError):
+        fit_svi(K25, w, 0.25, weights=-np.ones(25))
+
+
+def test_projection_onto_the_constraint_set():
+    """`_project` moves a point that violates Lee's bound or w_min >= 0 onto the boundary (b first, then a) and leaves a
+    feasible point alone; after projection `_feasible` holds exactly, which is what lets a real slice whose SLSQP
+    polish stops 1e-6 outside w_min >= 0 be kept (with `method` "+proj") instead of raising."""
+    from volsurf.svi import _feasible, _project
+
+    x, moved = _project(np.array([0.02, 0.4, -0.6, 0.05, 0.2]))
+    assert not moved and np.array_equal(x, [0.02, 0.4, -0.6, 0.05, 0.2])
+    x, moved = _project(np.array([-0.05, 0.1, 0.0, 0.0, 0.1]))  # w_min = -0.04
+    assert moved and _feasible(x, 0.0) and x[0] == pytest.approx(-0.01) and x[1:].tolist() == [0.1, 0.0, 0.0, 0.1]
+    x, moved = _project(np.array([0.1, 3.0, 0.5, 0.0, 0.3]))  # b(1+|rho|) = 4.5
+    assert moved and _feasible(x, 1e-15) and x[1] * 1.5 == pytest.approx(LEE_BOUND) and x[0] == 0.1
+    x, moved = _project(np.array([-1.0, 3.0, 0.5, 0.0, 0.3]))  # both: Lee first, then a to the new w_min
+    assert moved and _feasible(x, 1e-15) and x[1] * 1.5 == pytest.approx(LEE_BOUND)
+    assert SVISlice(SVIParams(*x), 1.0).min_total_variance() == pytest.approx(0.0, abs=1e-15)
+
+
+def test_at_bound_names_the_active_boundaries():
+    """A smile that is linear in vol (sigma = 0.70 - 0.7 k) has w touching 0 on the call wing: the fit pins w_min = 0
+    and says so; the exact slice touches nothing; a V-shaped w pins sigma at its floor."""
+    k = np.linspace(-0.3, 0.3, 41)
+    fit = fit_svi(k, (0.70 - 0.7 * k) ** 2 * 0.25, 0.25)
+    assert "w_min" in fit.at_bound and SVISlice(fit.params, 0.25).min_total_variance() == pytest.approx(0.0, abs=1e-6)
+    assert fit_svi(K25, SVISlice(TRUE, 0.25).w(K25), 0.25).at_bound == ()
+    v = fit_svi(k, 0.04 + 0.3 * np.abs(k - 0.02), 0.25)
+    assert "sigma" in v.at_bound and v.params.sigma == pytest.approx(1e-4, abs=1e-9)

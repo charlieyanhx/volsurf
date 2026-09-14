@@ -2,10 +2,10 @@
 a stated time-to-expiry rule, and a filter ledger so every row that leaves the fit is counted.
 
 Columns of `Chain.df` (one row per quote; nothing derived is stored, so nothing can disagree):
-  expiry        datetime64[ns]  settlement date
+  expiry        datetime64[ns]  settlement date (the dtype is enforced: date objects or strings are rejected)
   strike        float
   right         "C" | "P"
-  bid, ask      float, dollars per share/unit (bid >= 0, ask >= bid; crossed quotes are rejected)
+  bid, ask      float, dollars per share/unit (finite, bid >= 0, ask >= bid; NaN and crossed quotes are rejected)
   bid_size, ask_size, volume, open_interest   float, NaN when the source has none
   root          str, the listing root ("SPX" and "SPXW" are different slices on the same date)
   settlement    "AM" | "PM" — AM-settled options (SPX monthlies) expire at the 09:30 open
@@ -95,10 +95,16 @@ class Chain:
         if self.exercise not in ("european", "american"):
             raise ValueError("exercise must be 'european' or 'american'")
         df = self.df
+        if not pd.api.types.is_datetime64_dtype(df["expiry"]):
+            raise ValueError(f"expiry must be tz-naive datetime64, not {df['expiry'].dtype} (a date object or an ISO "
+                             "string column never equals a Timestamp, so slices() would yield nothing); pd.to_datetime it")
         if not set(df["right"].unique()) <= {"C", "P"}:
             raise ValueError("right must be 'C' or 'P'")
         if not set(df["settlement"].unique()) <= {"AM", "PM"}:
             raise ValueError("settlement must be 'AM' or 'PM'")
+        if not np.isfinite(df[["strike", "bid", "ask"]].to_numpy(dtype=float)).all():
+            raise ValueError("strike, bid and ask must be finite (NaN quotes pass every < / > check silently; "
+                             "readers drop and count them)")
         if (df["strike"] <= 0).any():
             raise ValueError("strikes must be positive")
         if (df["bid"] < 0).any() or (df["ask"] < df["bid"]).any():
@@ -119,11 +125,14 @@ class Chain:
         return [(str(r), pd.Timestamp(e)) for r, e in keys.itertuples(index=False)]
 
     def slices(self, min_T: float = HOUR) -> Iterator[Slice]:
-        """One Slice per (root, expiry) with T > min_T; expired ones are counted in the ledger."""
+        """One Slice per (root, expiry) with T > min_T; expired ones are counted in the ledger (once per rule, however
+        often the chain is sliced: the step is deterministic in the chain)."""
         T = self.T
         n_in = len(self.df)
         keep = T > min_T
-        self.ledger.record(f"T > {min_T:.2e} y (expired slices dropped)", n_in, int(keep.sum()))
+        rule = f"T > {min_T:.2e} y (expired slices dropped)"
+        if not any(r == rule for r, _, _ in self.ledger.steps):
+            self.ledger.record(rule, n_in, int(keep.sum()))
         df = self.df[keep]
         Tk = T[keep]
         for root, exp in self.expiries():

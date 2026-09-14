@@ -4,11 +4,13 @@ Model, per two-sided strike pair (bid > 0 on both legs):  C - P = D (F - K),  wi
 Two estimators, the mode recorded on the result:
   parity_line     joint WLS of y = C - P on K: D = -slope, F = -intercept / slope. European only
                   (SPX, XSP, VIX): on American chains ITM puts carry early-exercise premium and the
-                  free line returns D > 1 (implied r of -1 % to -54 % on SPY when r = 5 %).
+                  free line returns D > 1 (implied r of -0.8 % to -54 % on SPY when r = 5 %).
                   Refused for exercise == "american" unless force=True; rejected when
                   D is outside (0.5, 1.02] or fewer than min_pairs pairs survive.
   fixed_discount  D = exp(-rate T) pinned, F = sum w (C - P + D K) / (D sum w). The American
-                  default; also fine for European chains when a rate is known.
+                  default; also fine for European chains when a rate is known. Rejected (ValueError)
+                  when F <= 0 or |F / K_atm - 1| > FORWARD_BAND: mids that put the forward that far from
+                  the strike of smallest |C - P| do not satisfy parity and the number would be garbage.
 Weights w = 1 / (hw_C^2 + hw_P^2) with hw the half-widths floored at one tick (0.01), because the
 mid's error variance scales with the width squared and a locked quote must not get infinite weight.
 Pairs are restricted to |K / K_atm - 1| < window with K_atm the strike of smallest |C - P|, refitted
@@ -32,7 +34,7 @@ import pandas as pd
 
 from volsurf.quotes import Chain, Slice
 
-__all__ = ["ForwardFit", "fit_forward", "forward_table", "TICK", "HUBER_C", "DISCOUNT_BAND"]
+__all__ = ["ForwardFit", "fit_forward", "forward_table", "TICK", "HUBER_C", "DISCOUNT_BAND", "FORWARD_BAND"]
 
 TICK = 0.01
 HUBER_C = 3.0
@@ -40,6 +42,7 @@ HUBER_ROUNDS = 10
 MAD_TO_SIGMA = 1.4826
 _EXACT_SCALE = 1e-3 * TICK  # a MAD below a thousandth of a tick is rounding, not a residual
 DISCOUNT_BAND = (0.5, 1.02)
+FORWARD_BAND = 0.5  # |F / K_atm - 1| beyond this is not a forward
 MODES = ("auto", "parity_line", "fixed_discount")
 _WIDEN_STEPS = 8
 
@@ -95,8 +98,7 @@ def _solve(K, y, w, mode: str, D_fixed: float | None) -> tuple[float, float]:
     sw = w.sum()
     if mode == "fixed_discount":
         D = float(D_fixed)
-        F = float(np.sum(w * (y + D * K)) / (D * sw))
-        return F, D
+        return float(np.sum(w * (y + D * K)) / (D * sw)), D
     Kbar = np.sum(w * K) / sw
     ybar = np.sum(w * y) / sw
     sxx = np.sum(w * (K - Kbar) ** 2)
@@ -171,6 +173,9 @@ def fit_forward(slice: Slice, rate: float | None = None, mode: str = "auto", win
     k_atm = float(K[np.argmin(np.abs(y))])
     mask = _select_window(K, k_atm, window, min_pairs, notes)
     F, D = _solve(K[mask], y[mask], w_all[mask], mode_used, D_fixed)
+    if not (F > 0 and abs(F / k_atm - 1.0) <= FORWARD_BAND):
+        raise ValueError(f"{slice.label()}: {mode_used} forward F = {F:.4f} is not within {FORWARD_BAND:g} of the "
+                         f"ATM strike {k_atm:g}: the mids do not satisfy C - P = D (F - K)")
     if window is not None:
         mask = _select_window(K, F, window, min_pairs, notes)
         notes.append(f"window {window:g} recentred from K_atm {k_atm:g} to F {F:.4f}: {int(mask.sum())} pairs")

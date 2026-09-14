@@ -12,7 +12,9 @@ Units and signs (stated because vendors differ and factor-of-100 slips are silen
   vega       = dPV/dsigma per 1.00 of volatility (divide by 100 for "per vol point")
   theta      = dPV/dt per CALENDAR DAY (YEAR = 365), holding F and D fixed
   vanna      = d²PV/(dF dsigma), volga = d²PV/dsigma²
-  sigma = 0 prices at intrinsic; T <= 0 raises (an expired option has no Black price).
+  sigma = 0 prices at intrinsic; T <= 0 raises (an expired option has no Black price); a NaN sigma (the
+  inverter's "no information" answer, or an SVI slice with w < 0) propagates as a NaN price / vega, never as
+  intrinsic or 0.
 """
 
 from __future__ import annotations
@@ -44,6 +46,8 @@ def _check(F, K, T):
 def _is_call(right) -> np.ndarray:
     """"C"/"P" strings (numpy str, or a pandas object column) or booleans is_call → boolean array."""
     r = np.asarray(right)
+    if r.dtype.kind == "O" and r.size and all(isinstance(v, (bool, np.bool_)) for v in r.flat):
+        return r.astype(bool)          # an object column of Python booleans (str() of True is not "C")
     if r.dtype.kind in "USO":          # 'O': a pandas object column would otherwise read as all-True booleans
         return np.char.upper(r.astype(str)) == "C"
     return r.astype(bool)
@@ -70,7 +74,7 @@ def price(F, K, T, sigma, right="C", D=1.0):
         c = F * ndtr(d1) - K * ndtr(d2)
         p = K * ndtr(-d2) - F * ndtr(-d1)
     intrinsic = np.where(call, np.maximum(F - K, 0.0), np.maximum(K - F, 0.0))
-    out = np.where(sigma > 0, np.where(call, c, p), intrinsic)
+    out = np.where(sigma == 0, intrinsic, np.where(call, c, p))  # `sigma > 0` would price a NaN vol at intrinsic
     return D * out
 
 
@@ -81,7 +85,7 @@ def vega(F, K, T, sigma, D=1.0):
     d1, _ = d1d2(F, K, T, sigma)
     with np.errstate(invalid="ignore"):
         v = D * F * np.exp(-0.5 * d1 * d1) / _SQRT_2PI * np.sqrt(T)
-    return np.where(sigma > 0, v, 0.0)
+    return np.where(sigma == 0, 0.0, v)  # NaN sigma stays NaN
 
 
 @dataclass(frozen=True)

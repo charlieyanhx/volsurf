@@ -10,7 +10,10 @@ to the previous rule's n_out (the ledger conserves rows):
   3. finite iv_mid
   4. OTM only:       puts with k < 0, calls with k >= 0   (when otm_only; ATM k = 0 goes to the call side)
   5. rel. spread:    (ask - bid) / mid <= max_rel_spread, mid = (bid + ask)/2
-  6. |k| <= k_max    (when k_max is given)
+  6. |k| <= k_max    (default 0.35: beyond it a raw-SVI hyperbola cannot follow a low-vol put wing and the
+                      fit trades the body for the wing — SPY 2021-06-15 goes from 0.28 to 0.18 vp median RMSE and
+                      23 % to 52 % inside bid/ask with the cap, and 338 -> 60 calendar grid crossings, nearly all
+                      of them wing extrapolation; None disables the rule)
 The mask is over the input rows (True = kept); rules are applied to rows still alive, so counts add up.
 
 Weights multiply the SQUARED residual in `svi.fit_svi` (objective = sum w_i r_i^2):
@@ -41,7 +44,7 @@ def _rule(ledger: Ledger, name: str, alive: np.ndarray, keep: np.ndarray) -> np.
 
 
 def select(df_ivs: pd.DataFrame, T: float, otm_only: bool = True, min_bid_ticks: int = 2, tick: float = 0.01,
-           max_rel_spread: float = 0.2, k_max: float | None = None) -> tuple[np.ndarray, Ledger]:
+           max_rel_spread: float = 0.2, k_max: float | None = 0.35) -> tuple[np.ndarray, Ledger]:
     """Boolean mask over the rows of `df_ivs` plus the ledger of what each rule removed (rules in the module docstring)."""
     missing = [c for c in REQUIRED_COLUMNS if c not in df_ivs.columns]
     if missing:

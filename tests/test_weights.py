@@ -69,7 +69,7 @@ def test_every_rule_fires_in_order_and_counts_add_up():
 def test_otm_only_off_and_no_k_max_skip_those_rules():
     df = _on_model_frame()
     df.loc[3, "right"] = "C"
-    mask, ledger = select(df, T, otm_only=False)
+    mask, ledger = select(df, T, otm_only=False, k_max=None)
     assert mask.all() and len(ledger.steps) == 4
 
 
