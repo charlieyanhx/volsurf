@@ -10,7 +10,8 @@ dependencies = ["numpy>=1.26", "scipy>=1.11", "pandas>=2.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff", "pyarrow>=15"]
-oracle = ["lets-be-rational>=1.1.2", "pricers @ git+https://github.com/charlieyanhx/pricers"]
+# the four pricers oracle tests need the sibling repo installed by hand: pip install -e ../pricers (not on PyPI)
+oracle = ["lets-be-rational>=1.1.2"]
 
 [project.urls]
 Homepage = "https://github.com/charlieyanhx/volsurf"
