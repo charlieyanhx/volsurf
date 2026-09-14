@@ -1,0 +1,16 @@
+# Changelog
+
+## 0.1.0 — 2026-09-14
+First release. Implied-volatility surfaces from end-of-day option chains, synthetic tests only.
+- `quotes` — `Chain` / `Slice` / `Ledger`; fixed quote schema; ACT/365 time rule from the 16:15 quote to the 16:00 (PM) or 09:30 (AM) settlement; crossed quotes and duplicate keys raise; every dropped row counted
+- `black` — Black-76 on the forward: price, vega, Greeks (vega per 1.00 vol, theta per calendar day), `delta_spot`
+- `iv` — vectorised inverter (forward-normalised, OTM via parity, Corrado–Miller start, bracketed Halley in s = σ√T, convergence tested before the bracket); NaN below intrinsic, above the cap, or when time value < 1e-10 F; `implied_vols` per slice; `from_spot` adapter in `pricers.bs` conventions; agreement with `pricers.bs.implied_vol` and `lets_be_rational` to 1e-9 when installed
+- `forward` — `fit_forward` with `parity_line` (European: free (F, D)) and `fixed_discount` (American: D pinned from a rate); spread weights, near-ATM window recentred once and widened while thin, Huber pass; `forward_table` with the ex-dividend jump diagnostic; the parity line refuses American chains and rejects D outside (0.5, 1.02]
+- `svi` — `SVIParams` / `SVISlice` (w, w', w'', g, w_min, wing slopes), SVI-JW and SSVI maps, `LEE_BOUND = 2.0` in total variance (not 4), `fit_svi` (41 × 41 Zeliade grid with the linear inner solve + constrained polish; constraints w_min ≥ 0 and b(1+|ρ|) ≤ 2 only, no 0 ≤ a box), `fit_svi_multistart` (36-start SLSQP reference)
+- `arb` — `butterfly` (g on the quoted range plus margin, violations counted inside vs outside, analytic wing asymptotes with `Evidence`), `calendar`, `quote_level` (raw-mid and within-band convexity counts), `check_arbitrage`, `repair_jw` (GJ §5.1, opt-in, never called by the fitter)
+- `weights` — `select` (two-sided, bid ≥ 2 ticks, finite iv, OTM only, relative spread, |k| cap) with a ledger; spread / vega / unit weights
+- `synth` — `synthetic_chain` from known SVI slices, `SYNTH_SURFACE` (four expiries, negative skew, calendar-monotone, g > 0), `synthetic_cboe_json`
+- `surface` — `fit_slice` / `fit_surface` (forward → IVs → selection → weights → SVI → butterfly / quote-level / coverage per slice; calendar on the k-range both adjacent slices quote), `SliceFit` / `Surface`, `skew` by true Black delta, `term_structure`, `report`, coverage by |k| bucket; skipped slices carry their reason
+- `io` — `parse_occ`, `read_cboe_json`, `read_philippdubach`, `read_mztrading`; quote-date rules; AM/PM settlement by root and third Friday; source IV / Greeks columns never read
+- `report` / `cli` — `volsurf report` regenerates the README's synthetic tables in place from fixed seeds (byte-identical on a second run, wall times kept out of the blocks); `volsurf report --data` prints the private real-chain row; `volsurf fit` prints one surface
+- 118 tests, synthetic only; oracles: Vogt (GJ 2014 Ex. 3.1) g_min −0.0329 at k 0.879 and its SVI-JW, the market-like slice g_min −0.0200 at k −0.276, the Heston-like SSVI asymptote −0.0988, the Heston COS surface from `pricers` (0 violations on either basis), exact SVI recovery to 1e-8, parity F to 1e-9 and D to 1e-12, IV round trip bars by time-value bucket

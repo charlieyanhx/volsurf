@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# private validation data: never committed (see README "Data and privacy")
+data/private/
+docs/validation-private.md
