@@ -292,6 +292,10 @@ re-export volsurf ·
 [tickq](https://github.com/charlieyanhx/tickq) — DuckDB market-data SQL: partitioned Parquet lake, ASOF
 joins with the tie rule stated, quality checks with recall and precision ·
 [lobcore](https://github.com/charlieyanhx/lobcore) — bounded-array limit order book in Rust with a
-reference-book differential test, ITCH 5.0 replay and PyO3 bindings.
+reference-book differential test, ITCH 5.0 replay and PyO3 bindings ·
+[exhibitkit](https://github.com/charlieyanhx/exhibitkit) — sell-side research documents from Markdown, exhibits
+with mandatory source lines ·
+[claimkeeper](https://github.com/charlieyanhx/claimkeeper) — a ledger that scores a note's falsifiable claims
+right or wrong once their dates arrive.
 
 MIT © Hanxiong (Charlie) Yan
