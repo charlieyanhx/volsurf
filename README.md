@@ -288,6 +288,10 @@ and the evals that measure it ·
 [quotesim](https://github.com/charlieyanhx/quotesim) — market-making simulator whose fair surface this
 repo will provide ·
 [options-surface-mcp](https://github.com/charlieyanhx/options-surface-mcp) — the MCP server that will
-re-export volsurf.
+re-export volsurf ·
+[tickq](https://github.com/charlieyanhx/tickq) — DuckDB market-data SQL: partitioned Parquet lake, ASOF
+joins with the tie rule stated, quality checks with recall and precision ·
+[lobcore](https://github.com/charlieyanhx/lobcore) — bounded-array limit order book in Rust with a
+reference-book differential test, ITCH 5.0 replay and PyO3 bindings.
 
 MIT © Hanxiong (Charlie) Yan
