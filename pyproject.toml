@@ -1,6 +1,6 @@
 [project]
 name = "volsurf"
-version = "0.1.0"
+version = "0.2.0"
 description = "Implied-volatility surfaces from option chains: parity forwards, a vectorised Black inverter, raw-SVI slice fits with static-arbitrage checks (butterfly g(k) on a declared range plus wing asymptotes, calendar between slices, quote-level within-band checks), fit quality in vol points and bid/ask coverage."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,12 +12,16 @@ dependencies = ["numpy>=1.26", "scipy>=1.11", "pandas>=2.0"]
 dev = ["pytest>=8", "ruff", "pyarrow>=15"]
 # the four pricers oracle tests need the sibling repo installed by hand: pip install -e ../pricers (not on PyPI)
 oracle = ["lets-be-rational>=1.1.2"]
+# the tool layer (volsurf.mcp) needs nothing extra to run or test; these add the server and a live chain source
+mcp = ["mcp>=1.0"]
+live = ["yfinance>=0.2"]
 
 [project.urls]
 Homepage = "https://github.com/charlieyanhx/volsurf"
 
 [project.scripts]
 volsurf = "volsurf.cli:main"
+volsurf-mcp = "volsurf.mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]

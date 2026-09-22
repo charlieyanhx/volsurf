@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 — 2026-09-21
+`volsurf.mcp`: the surface as tools an agent can call. Merged from `options-surface-mcp`, which is archived.
+- Six tools (`fetch_chain`, `calibrate_surface`, `surface_term_structure`, `surface_skew`, `option_greeks`, `arbitrage_check`) as plain functions, a FastMCP server (`volsurf-mcp`, extra `[mcp]`), a bundled XSP chain, and a yfinance source (extra `[live]`)
+- An adapter, not a second stack: the old repo's own `chain` / `svi` / `surface` / `blackscholes` modules are gone; every number now comes from `forward`, `svi`, `arb`, `black` and `surface`. Forward recovery on the bundled chain went from a stated 0.05 tolerance to < 1e-4, because the forward is now read from parity rather than fitted
+- 30 evals (`python -m volsurf.mcp.evals`) whose expectations are derived from the generator's SVI parameters, discounts and dates, never recorded. **Fixed a data bug in the migrated golden chain:** its first expiry carried a hand-typed `t = 0.0959` (35 days) against an `as_of` 43 days out; T is now derived through `quotes.time_to_expiry` in both the generator and the evals, so the two cannot disagree
+- 24 tests under `tests/mcp/` (tool contract + eval harness); the whole suite is 163 tests in ~80 s
+
 ## 0.1.0 — 2026-09-14
 First release. Implied-volatility surfaces from end-of-day option chains, synthetic tests only.
 - `weights.select` caps the fit at |k| <= 0.35 by default (SPY 2021-06-15: 0.28 -> 0.18 vp median RMSE, 23 % -> 52 % inside bid/ask, 338 -> 60 calendar grid crossings; docs/DESIGN.md); `k_max=None` disables it

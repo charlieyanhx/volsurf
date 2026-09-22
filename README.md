@@ -202,6 +202,30 @@ philippdubach day, 73 and 69 on the delayed mztrading SPY/NVDA snaps) are the ho
 quotes" number; the raw-mid counts the fitted-surface diagnostics also print are 15–30 % on every day and mean
 nothing.
 
+## As tools an agent can call
+
+`volsurf.mcp` exposes the fitted surface as six plain functions — `fetch_chain`, `calibrate_surface`,
+`surface_term_structure`, `surface_skew`, `option_greeks`, `arbitrage_check` — and a FastMCP server over
+them. It is an adapter, not a second implementation: every forward, fit, Greek and arbitrage verdict comes
+from the modules above. A bundled XSP chain ships so the tools answer with nothing installed; `[live]` adds a
+yfinance source.
+
+```bash
+pip install "volsurf[mcp]"        # the server
+volsurf-mcp                       # stdio; register it with your MCP host
+python -m volsurf.mcp.evals       # 30 evals against the bundled chain
+```
+
+The evals are the part worth reading. Expected values are *derived* from the SVI parameters, discounts and
+dates the bundled chain was generated from (`mcp/data/make_golden_chain.py`), never recorded from a previous
+run — a golden set recorded from your own output freezes your bugs as the specification and passes forever.
+Time-to-expiry is re-derived through `quotes.time_to_expiry`, so the generator and the reader cannot disagree
+about T. On the bundled chain the tools recover every forward to under 1e-4 and every slice to 0.25 vol points
+RMSE, and `arbitrage_check` returns a verified `arbitrage_free`, not an assumed one.
+
+`fetch_chain` / `calibrate_surface` are cached per (underlying, source, filter), so six tool calls in one
+conversation share one calibration and agree with each other.
+
 ## Design rules
 
 Tested:
@@ -249,7 +273,11 @@ src/volsurf/
   io.py         parse_occ, read_cboe_json, read_philippdubach, read_mztrading
   report.py     README blocks, private row, timing
   cli.py        volsurf report / fit
-tests/          one file per module (report and cli share test_report_cli.py); synthetic data only
+  mcp/          the surface as tools: sources (bundled XSP chain, yfinance), facade (Surface -> tool
+                vocabulary), tools (the six functions), server (FastMCP), data/ (golden chain + generator),
+                evals/ (30 derived-not-recorded evals; python -m volsurf.mcp.evals)
+tests/          one file per module (report and cli share test_report_cli.py); tests/mcp/ for the tool
+                contract and the eval harness; synthetic data only
 docs/PLAN.md    the contract (v0.1 scope, oracles, what changed from plan v1 and why)
 docs/DESIGN.md  the design rules and the findings behind them
 CHANGELOG.md    what each version added
@@ -260,7 +288,7 @@ CHANGELOG.md    what each version added
 - v0.2: SSVI (power law with gamma <= 1/2, Heston-like with lambda >= (1+|rho|)/4; GJ Thm 4.1 / 4.2 as tests) and
   eSSVI with Pasquazzi's calendar conditions; a Greeks module (sticky-strike, sticky-moneyness, minimum-variance
   delta); smile and total-variance plots; the American implied-dividend refinement (Brent on q against a binomial
-  tree via `pricers.trees`); time interpolation between slices; `options-surface-mcp` v0.2 depending on volsurf.
+  tree via `pricers.trees`); time interpolation between slices. (The MCP layer that was planned as `options-surface-mcp` v0.2 landed here instead, as `volsurf.mcp`.)
 - v0.3: local volatility (Dupire in total variance with the denominator ≡ g(k) as a tested identity; negative local
   variance reported, never clipped); events (straddle expected move, event variance between two expiries); VIX
   single-slice fits with `forward_source=parity|futures` and the calendar check marked not applicable; PyPI.
@@ -287,8 +315,6 @@ and the evals that measure it ·
 [riskkit](https://github.com/charlieyanhx/riskkit) — portfolio risk with the limit-down and empty-book states first-class ·
 [quotesim](https://github.com/charlieyanhx/quotesim) — market-making simulator whose fair surface this
 repo will provide ·
-[options-surface-mcp](https://github.com/charlieyanhx/options-surface-mcp) — the MCP server that will
-re-export volsurf ·
 [tickq](https://github.com/charlieyanhx/tickq) — DuckDB market-data SQL: partitioned Parquet lake, ASOF
 joins with the tie rule stated, quality checks with recall and precision ·
 [lobcore](https://github.com/charlieyanhx/lobcore) — bounded-array limit order book in Rust with a
